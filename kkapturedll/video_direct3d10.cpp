@@ -32,6 +32,7 @@
 #include <d3d10.h>
 
 static HRESULT(__stdcall* Real_CreateDXGIFactory)(REFIID riid, void** ppFactory) = 0;
+static HRESULT(__stdcall* Real_CreateDXGIFactory2)(UINT flag, REFIID riid, void** ppFactory) = 0;
 static HRESULT(__stdcall* Real_Factory_CreateSwapChain)(IUnknown* me, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** chain) = 0;
 static HRESULT(__stdcall* Real_SwapChain_Present)(IDXGISwapChain* me, UINT SyncInterval, UINT Flags) = 0;
 
@@ -162,14 +163,15 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
     if (SUCCEEDED(swap->GetBuffer(0, IID_ID3D12Resource, (void**)&frameResource)) &&
         SUCCEEDED(frameResource->GetDevice(IID_ID3D12Device, (void**)&device)))
     {
-        static ID3D12Resource* readBackResource = 0;
         static ID3D12CommandQueue* commandQueue = 0;
         static ID3D12CommandAllocator* commandAllocator = 0;
+        static ID3D12Resource* readBackResource = 0;
         static ID3D12GraphicsCommandList* commandList = 0;
         static ID3D12Fence* fence = 0;
         static HANDLE fenceEvent = 0;
         static unsigned long long fenceValue = 0;
 
+        D3D12_COMMAND_LIST_TYPE commandListType = D3D12_COMMAND_LIST_TYPE_COPY;
         D3D12_RESOURCE_DESC frameDesc = frameResource->GetDesc();
         if (frameDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
         {
@@ -188,7 +190,7 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
         if (fence && !commandQueue)
         {
             D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-            queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            queueDesc.Type = commandListType;
             queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
             queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
             queueDesc.NodeMask = 0;
@@ -197,12 +199,12 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
 
         if (commandQueue && !commandAllocator)
         {
-            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator, (void**)&commandAllocator);
+            device->CreateCommandAllocator(commandListType, IID_ID3D12CommandAllocator, (void**)&commandAllocator);
         }
 
         if (commandAllocator && !commandList)
         {
-            if (SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator, nullptr, IID_ID3D12GraphicsCommandList, (void**)&commandList)))
+            if (SUCCEEDED(device->CreateCommandList(0, commandListType, commandAllocator, nullptr, IID_ID3D12GraphicsCommandList, (void**)&commandList)))
             {
                 commandList->Close();
             }
@@ -233,11 +235,11 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
             resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
 
             device->CreateCommittedResource(
-                &readBackHeap, 
+                &readBackHeap,
                 D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
                 &resourceDesc,
                 D3D12_RESOURCE_STATE_COPY_DEST,
-                0, 
+                0,
                 IID_ID3D12Resource,
                 (void**)&readBackResource
             );
@@ -266,6 +268,7 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
             commandList->Close();
             commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandList);
             commandQueue->Signal(fence, ++fenceValue);
+
             if (fence->GetCompletedValue() != fenceValue)
             {
                 fence->SetEventOnCompletion(fenceValue, fenceEvent);
@@ -275,10 +278,10 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
             void* mappedResource = 0;
             if (SUCCEEDED(readBackResource->Map(0, 0, &mappedResource)))
             {
-                blitAndFlipRGBAToCaptureData((unsigned char*)mappedResource, dst.PlacedFootprint.Footprint.RowPitch);
+                blitAndFlipRGBAToCaptureData((unsigned char*)mappedResource, (unsigned int)frameDesc.Width * sizeof(int));
                 readBackResource->Unmap(0, 0);
-                return true;
             }
+            return true;
         }
     }
     return false;
@@ -314,7 +317,17 @@ static HRESULT __stdcall Mine_Factory_CreateSwapChain(IUnknown* me, IUnknown* de
 static HRESULT __stdcall Mine_CreateDXGIFactory(REFIID riid, void** ppFactory)
 {
     HRESULT hr = Real_CreateDXGIFactory(riid, ppFactory);
-    if (SUCCEEDED(hr) && 
+    if (!Real_Factory_CreateSwapChain && SUCCEEDED(hr) &&
+        (riid == IID_IDXGIFactory || riid == IID_IDXGIFactory1 || riid == IID_IDXGIFactory2 || riid == IID_IDXGIFactory3 || riid == IID_IDXGIFactory4))
+        HookCOMOnce(&Real_Factory_CreateSwapChain, (IUnknown*)*ppFactory, 10, Mine_Factory_CreateSwapChain);
+
+    return hr;
+}
+
+static HRESULT __stdcall Mine_CreateDXGIFactory2(UINT flag, REFIID riid, void** ppFactory)
+{
+    HRESULT hr = Real_CreateDXGIFactory2(flag, riid, ppFactory);
+    if (!Real_Factory_CreateSwapChain && SUCCEEDED(hr) &&
         (riid == IID_IDXGIFactory || riid == IID_IDXGIFactory1 || riid == IID_IDXGIFactory2 || riid == IID_IDXGIFactory3 || riid == IID_IDXGIFactory4))
         HookCOMOnce(&Real_Factory_CreateSwapChain, (IUnknown*)*ppFactory, 10, Mine_Factory_CreateSwapChain);
 
@@ -325,5 +338,8 @@ void initVideo_Direct3D10()
 {
     HMODULE dxgi = LoadLibraryA("dxgi.dll");
     if (dxgi)
+    {
         HookDLLFunction(&Real_CreateDXGIFactory, dxgi, "CreateDXGIFactory", Mine_CreateDXGIFactory);
+        HookDLLFunction(&Real_CreateDXGIFactory2, dxgi, "CreateDXGIFactory2", Mine_CreateDXGIFactory2);
+    }
 }
