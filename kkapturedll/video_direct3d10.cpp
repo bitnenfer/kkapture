@@ -177,7 +177,7 @@ static bool grabFrameD3D12(IDXGISwapChain* swap)
             return false;
         }
 
-        setCaptureResolution(frameDesc.Width, frameDesc.Height);
+        setCaptureResolution((int)frameDesc.Width, (int)frameDesc.Height);
 
         if (!fence)
         {
