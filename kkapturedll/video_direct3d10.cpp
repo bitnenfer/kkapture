@@ -155,12 +155,141 @@ static bool grabFrameD3D11(IDXGISwapChain* swap)
     return grabOk;
 }
 
+static bool grabFrameD3D12(IDXGISwapChain* swap)
+{
+    ID3D12Device* device = 0;
+    ID3D12Resource* frameResource = 0;
+    if (SUCCEEDED(swap->GetBuffer(0, IID_ID3D12Resource, (void**)&frameResource)) &&
+        SUCCEEDED(frameResource->GetDevice(IID_ID3D12Device, (void**)&device)))
+    {
+        static ID3D12Resource* readBackResource = 0;
+        static ID3D12CommandQueue* commandQueue = 0;
+        static ID3D12CommandAllocator* commandAllocator = 0;
+        static ID3D12GraphicsCommandList* commandList = 0;
+        static ID3D12Fence* fence = 0;
+        static HANDLE fenceEvent = 0;
+        static unsigned long long fenceValue = 0;
+
+        D3D12_RESOURCE_DESC frameDesc = frameResource->GetDesc();
+        if (frameDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+        {
+            printLog("video/d3d12: unsupported backbuffer format, can't grab pixels!\n");
+            return false;
+        }
+
+        setCaptureResolution(frameDesc.Width, frameDesc.Height);
+
+        if (!fence)
+        {
+            device->CreateFence(fenceValue, D3D12_FENCE_FLAG_NONE, IID_ID3D12Fence, (void**)&fence);
+            fenceEvent = CreateEvent(0, 0, 0, 0);
+        }
+
+        if (fence && !commandQueue)
+        {
+            D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+            queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+            queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+            queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+            queueDesc.NodeMask = 0;
+            device->CreateCommandQueue(&queueDesc, IID_ID3D12CommandQueue, (void**)&commandQueue);
+        }
+
+        if (commandQueue && !commandAllocator)
+        {
+            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator, (void**)&commandAllocator);
+        }
+
+        if (commandAllocator && !commandList)
+        {
+            if (SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator, nullptr, IID_ID3D12GraphicsCommandList, (void**)&commandList)))
+            {
+                commandList->Close();
+            }
+        }
+
+        if (commandList && !readBackResource)
+        {
+            unsigned long long BufferSize = frameDesc.Width * frameDesc.Height * sizeof(int);
+
+            D3D12_HEAP_PROPERTIES readBackHeap;
+            readBackHeap.Type = D3D12_HEAP_TYPE_READBACK;
+            readBackHeap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+            readBackHeap.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+            readBackHeap.CreationNodeMask = 0;
+            readBackHeap.VisibleNodeMask = 0;
+
+            D3D12_RESOURCE_DESC resourceDesc;
+            resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            resourceDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+            resourceDesc.Width = ((BufferSize)+((256L)-1L)) & ~((256L)-1L);
+            resourceDesc.Height = 1;
+            resourceDesc.DepthOrArraySize = 1;
+            resourceDesc.MipLevels = 1;
+            resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
+            resourceDesc.SampleDesc.Count = 1;
+            resourceDesc.SampleDesc.Quality = 0;
+            resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+            device->CreateCommittedResource(
+                &readBackHeap, 
+                D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
+                &resourceDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                0, 
+                IID_ID3D12Resource,
+                (void**)&readBackResource
+            );
+        }
+
+        if (readBackResource)
+        {
+            D3D12_TEXTURE_COPY_LOCATION dst;
+            dst.pResource = readBackResource;
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            dst.PlacedFootprint.Offset = 0;
+            dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            dst.PlacedFootprint.Footprint.Width = (unsigned int)frameDesc.Width;
+            dst.PlacedFootprint.Footprint.Height = (unsigned int)frameDesc.Height;
+            dst.PlacedFootprint.Footprint.Depth = 1;
+            dst.PlacedFootprint.Footprint.RowPitch = (unsigned int)frameDesc.Width * sizeof(int);
+
+            D3D12_TEXTURE_COPY_LOCATION src;
+            src.pResource = frameResource;
+            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            src.SubresourceIndex = 0;
+        
+            commandAllocator->Reset();
+            commandList->Reset(commandAllocator, nullptr);
+            commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, 0);
+            commandList->Close();
+            commandQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&commandList);
+            commandQueue->Signal(fence, ++fenceValue);
+            if (fence->GetCompletedValue() != fenceValue)
+            {
+                fence->SetEventOnCompletion(fenceValue, fenceEvent);
+                WaitForSingleObject(fenceEvent, INFINITE);
+            }
+
+            void* mappedResource = 0;
+            if (SUCCEEDED(readBackResource->Map(0, 0, &mappedResource)))
+            {
+                blitAndFlipRGBAToCaptureData((unsigned char*)mappedResource, dst.PlacedFootprint.Footprint.RowPitch);
+                readBackResource->Unmap(0, 0);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static HRESULT __stdcall Mine_SwapChain_Present(IDXGISwapChain* me, UINT SyncInterval, UINT Flags)
 {
 
     if (params.CaptureVideo)
     {
-        if (grabFrameD3D11(me) || grabFrameD3D10(me))
+        if (grabFrameD3D11(me) || grabFrameD3D10(me) || grabFrameD3D12(me))
             encoder->WriteFrame(captureData);
     }
 
