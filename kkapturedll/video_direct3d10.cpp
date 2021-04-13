@@ -26,172 +26,175 @@
 
 #include <InitGuid.h>
 #include <dxgi.h>
+#include <dxgi1_4.h>
+#include <d3d12.h>
 #include <d3d11.h>
 #include <d3d10.h>
 
-static HRESULT (__stdcall *Real_CreateDXGIFactory)(REFIID riid,void **ppFactory) = 0;
-static HRESULT (__stdcall *Real_Factory_CreateSwapChain)(IUnknown *me,IUnknown *dev,DXGI_SWAP_CHAIN_DESC *desc,IDXGISwapChain **chain) = 0;
-static HRESULT (__stdcall *Real_SwapChain_Present)(IDXGISwapChain *me,UINT SyncInterval,UINT Flags) = 0;
+static HRESULT(__stdcall* Real_CreateDXGIFactory)(REFIID riid, void** ppFactory) = 0;
+static HRESULT(__stdcall* Real_Factory_CreateSwapChain)(IUnknown* me, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** chain) = 0;
+static HRESULT(__stdcall* Real_SwapChain_Present)(IDXGISwapChain* me, UINT SyncInterval, UINT Flags) = 0;
 
-static bool grabFrameD3D10(IDXGISwapChain *swap)
+static bool grabFrameD3D10(IDXGISwapChain* swap)
 {
-  ID3D10Device *device = 0;
-  ID3D10Texture2D *tex = 0, *captureTex = 0;
+    ID3D10Device* device = 0;
+    ID3D10Texture2D* tex = 0, * captureTex = 0;
 
-  if (FAILED(swap->GetBuffer(0, IID_ID3D10Texture2D, (void**)&tex)))
-    return false;
+    if (FAILED(swap->GetBuffer(0, IID_ID3D10Texture2D, (void**)&tex)))
+        return false;
 
-  D3D10_TEXTURE2D_DESC desc;
-  tex->GetDevice(&device);
-  tex->GetDesc(&desc);
+    D3D10_TEXTURE2D_DESC desc;
+    tex->GetDevice(&device);
+    tex->GetDesc(&desc);
 
-  // re-creating the capture staging texture each frame is definitely not the most efficient
-  // way to handle things, but it frees me of all kind of resource management trouble, so
-  // here goes...
-  desc.MipLevels = 1;
-  desc.ArraySize = 1;
-  desc.SampleDesc.Count = 1;
-  desc.SampleDesc.Quality = 0;
-  desc.Usage = D3D10_USAGE_STAGING;
-  desc.BindFlags = 0;
-  desc.CPUAccessFlags = D3D10_CPU_ACCESS_READ;
-  desc.MiscFlags = 0;
+    // re-creating the capture staging texture each frame is definitely not the most efficient
+    // way to handle things, but it frees me of all kind of resource management trouble, so
+    // here goes...
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D10_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D10_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
 
-  if(FAILED(device->CreateTexture2D(&desc,0,&captureTex)))
-    printLog("video/d3d10: couldn't create staging texture for gpu->cpu download!\n");
-  else
-    setCaptureResolution(desc.Width,desc.Height);
+    if (FAILED(device->CreateTexture2D(&desc, 0, &captureTex)))
+        printLog("video/d3d10: couldn't create staging texture for gpu->cpu download!\n");
+    else
+        setCaptureResolution(desc.Width, desc.Height);
 
-  if(device)
-    device->CopySubresourceRegion(captureTex,0,0,0,0,tex,0,0);
+    if (device)
+        device->CopySubresourceRegion(captureTex, 0, 0, 0, 0, tex, 0, 0);
 
-  D3D10_MAPPED_TEXTURE2D mapped;
-  bool grabOk = false;
+    D3D10_MAPPED_TEXTURE2D mapped;
+    bool grabOk = false;
 
-  if(captureTex && SUCCEEDED(captureTex->Map(0,D3D10_MAP_READ,0,&mapped)))
-  {
-    switch(desc.Format)
+    if (captureTex && SUCCEEDED(captureTex->Map(0, D3D10_MAP_READ, 0, &mapped)))
     {
-    case DXGI_FORMAT_R8G8B8A8_UNORM:
-      blitAndFlipRGBAToCaptureData((unsigned char *) mapped.pData,mapped.RowPitch);
-      grabOk = true;
-      break;
+        switch (desc.Format)
+        {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            blitAndFlipRGBAToCaptureData((unsigned char*)mapped.pData, mapped.RowPitch);
+            grabOk = true;
+            break;
 
-    default:
-      printLog("video/d3d10: unsupported backbuffer format, can't grab pixels!\n");
-      break;
+        default:
+            printLog("video/d3d10: unsupported backbuffer format, can't grab pixels!\n");
+            break;
+        }
+
+        captureTex->Unmap(0);
     }
 
-    captureTex->Unmap(0);
-  }
+    tex->Release();
+    if (captureTex) captureTex->Release();
+    if (device) device->Release();
 
-  tex->Release();
-  if(captureTex) captureTex->Release();
-  if(device) device->Release();
-
-  return grabOk;
+    return grabOk;
 }
 
-static bool grabFrameD3D11(IDXGISwapChain *swap)
+static bool grabFrameD3D11(IDXGISwapChain* swap)
 {
-  ID3D11Device *device = 0;
-  ID3D11DeviceContext *context = 0;
-  ID3D11Texture2D *tex = 0, *captureTex = 0;
+    ID3D11Device* device = 0;
+    ID3D11DeviceContext* context = 0;
+    ID3D11Texture2D* tex = 0, * captureTex = 0;
 
-  if (FAILED(swap->GetBuffer(0, IID_ID3D11Texture2D, (void**)&tex)))
-    return false;
+    if (FAILED(swap->GetBuffer(0, IID_ID3D11Texture2D, (void**)&tex)))
+        return false;
 
-  D3D11_TEXTURE2D_DESC desc;
-  tex->GetDevice(&device);
-  tex->GetDesc(&desc);
+    D3D11_TEXTURE2D_DESC desc;
+    tex->GetDevice(&device);
+    tex->GetDesc(&desc);
 
-  // re-creating the capture staging texture each frame is definitely not the most efficient
-  // way to handle things, but it frees me of all kind of resource management trouble, so
-  // here goes...
-  desc.MipLevels = 1;
-  desc.ArraySize = 1;
-  desc.SampleDesc.Count = 1;
-  desc.SampleDesc.Quality = 0;
-  desc.Usage = D3D11_USAGE_STAGING;
-  desc.BindFlags = 0;
-  desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-  desc.MiscFlags = 0;
+    // re-creating the capture staging texture each frame is definitely not the most efficient
+    // way to handle things, but it frees me of all kind of resource management trouble, so
+    // here goes...
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
 
-  if(FAILED(device->CreateTexture2D(&desc,0,&captureTex)))
-    printLog("video/d3d11: couldn't create staging texture for gpu->cpu download!\n");
-  else
-    setCaptureResolution(desc.Width,desc.Height);
+    if (FAILED(device->CreateTexture2D(&desc, 0, &captureTex)))
+        printLog("video/d3d11: couldn't create staging texture for gpu->cpu download!\n");
+    else
+        setCaptureResolution(desc.Width, desc.Height);
 
-  device->GetImmediateContext(&context);
-  context->CopySubresourceRegion(captureTex,0,0,0,0,tex,0,0);
+    device->GetImmediateContext(&context);
+    context->CopySubresourceRegion(captureTex, 0, 0, 0, 0, tex, 0, 0);
 
-  D3D11_MAPPED_SUBRESOURCE mapped;
-  bool grabOk = false;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    bool grabOk = false;
 
-  if(captureTex && SUCCEEDED(context->Map(captureTex,0,D3D11_MAP_READ,0,&mapped)))
-  {
-    switch(desc.Format)
+    if (captureTex && SUCCEEDED(context->Map(captureTex, 0, D3D11_MAP_READ, 0, &mapped)))
     {
-    case DXGI_FORMAT_R8G8B8A8_UNORM:
-      blitAndFlipRGBAToCaptureData((unsigned char *) mapped.pData,mapped.RowPitch);
-      grabOk = true;
-      break;
+        switch (desc.Format)
+        {
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+            blitAndFlipRGBAToCaptureData((unsigned char*)mapped.pData, mapped.RowPitch);
+            grabOk = true;
+            break;
 
-    default:
-      printLog("video/d3d11: unsupported backbuffer format, can't grab pixels!\n");
-      break;
+        default:
+            printLog("video/d3d11: unsupported backbuffer format, can't grab pixels!\n");
+            break;
+        }
+
+        context->Unmap(captureTex, 0);
     }
 
-    context->Unmap(captureTex,0);
-  }
+    tex->Release();
+    if (captureTex) captureTex->Release();
+    context->Release();
+    device->Release();
 
-  tex->Release();
-  if(captureTex) captureTex->Release();
-  context->Release();
-  device->Release();
-
-  return grabOk;
+    return grabOk;
 }
 
-static HRESULT __stdcall Mine_SwapChain_Present(IDXGISwapChain *me,UINT SyncInterval,UINT Flags)
+static HRESULT __stdcall Mine_SwapChain_Present(IDXGISwapChain* me, UINT SyncInterval, UINT Flags)
 {
 
-  if(params.CaptureVideo)
-  {
-    if (grabFrameD3D11(me) || grabFrameD3D10(me))
-      encoder->WriteFrame(captureData);
-  }
+    if (params.CaptureVideo)
+    {
+        if (grabFrameD3D11(me) || grabFrameD3D10(me))
+            encoder->WriteFrame(captureData);
+    }
 
-  HRESULT hr = Real_SwapChain_Present(me,0,Flags);
+    HRESULT hr = Real_SwapChain_Present(me, 0, Flags);
 
-  nextFrame();
-  return hr;
+    nextFrame();
+    return hr;
 }
 
-static HRESULT __stdcall Mine_Factory_CreateSwapChain(IUnknown *me,IUnknown *dev,DXGI_SWAP_CHAIN_DESC *desc,IDXGISwapChain **chain)
+static HRESULT __stdcall Mine_Factory_CreateSwapChain(IUnknown* me, IUnknown* dev, DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** chain)
 {
-  HRESULT hr = Real_Factory_CreateSwapChain(me,dev,desc,chain);
-  if(SUCCEEDED(hr))
-  {
-    printLog("video/d3d10: swap chain created.\n");
-    HookCOMOnce(&Real_SwapChain_Present,*chain,8,Mine_SwapChain_Present);
-  }
+    HRESULT hr = Real_Factory_CreateSwapChain(me, dev, desc, chain);
+    if (SUCCEEDED(hr))
+    {
+        printLog("video/d3d10: swap chain created.\n");
+        HookCOMOnce(&Real_SwapChain_Present, *chain, 8, Mine_SwapChain_Present);
+    }
 
-  return hr;
+    return hr;
 }
 
-static HRESULT __stdcall Mine_CreateDXGIFactory(REFIID riid,void **ppFactory)
+static HRESULT __stdcall Mine_CreateDXGIFactory(REFIID riid, void** ppFactory)
 {
-  HRESULT hr = Real_CreateDXGIFactory(riid,ppFactory);
-  if(SUCCEEDED(hr) && riid == IID_IDXGIFactory)
-    HookCOMOnce(&Real_Factory_CreateSwapChain,(IUnknown *) *ppFactory,10,Mine_Factory_CreateSwapChain);
+    HRESULT hr = Real_CreateDXGIFactory(riid, ppFactory);
+    if (SUCCEEDED(hr) && 
+        (riid == IID_IDXGIFactory || riid == IID_IDXGIFactory1 || riid == IID_IDXGIFactory2 || riid == IID_IDXGIFactory3 || riid == IID_IDXGIFactory4))
+        HookCOMOnce(&Real_Factory_CreateSwapChain, (IUnknown*)*ppFactory, 10, Mine_Factory_CreateSwapChain);
 
-  return hr;
+    return hr;
 }
 
 void initVideo_Direct3D10()
 {
-  HMODULE dxgi = LoadLibraryA("dxgi.dll");
-  if(dxgi)
-    HookDLLFunction(&Real_CreateDXGIFactory,dxgi,"CreateDXGIFactory",Mine_CreateDXGIFactory);
+    HMODULE dxgi = LoadLibraryA("dxgi.dll");
+    if (dxgi)
+        HookDLLFunction(&Real_CreateDXGIFactory, dxgi, "CreateDXGIFactory", Mine_CreateDXGIFactory);
 }
